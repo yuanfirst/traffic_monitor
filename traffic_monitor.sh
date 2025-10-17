@@ -51,15 +51,28 @@ log() {
 # 格式化字节显示
 format_bytes() {
     local bytes=$1
-    local units=("B" "KB" "MB" "GB" "TB")
-    local unit_index=0
     
-    while [ $bytes -ge 1024 ] && [ $unit_index -lt 4 ]; do
-        bytes=$((bytes / 1024))
-        unit_index=$((unit_index + 1))
-    done
+    if [ -z "$bytes" ] || [ "$bytes" -eq 0 ]; then
+        echo "0 B"
+        return
+    fi
     
-    echo "${bytes}.${unit_index} ${units[$unit_index]}"
+    # 使用bc进行浮点数计算
+    if [ $bytes -lt 1024 ]; then
+        echo "${bytes} B"
+    elif [ $bytes -lt 1048576 ]; then  # 1024*1024
+        local kb=$(echo "scale=2; $bytes / 1024" | bc)
+        echo "${kb} KB"
+    elif [ $bytes -lt 1073741824 ]; then  # 1024*1024*1024
+        local mb=$(echo "scale=2; $bytes / 1048576" | bc)
+        echo "${mb} MB"
+    elif [ $bytes -lt 1099511627776 ]; then  # 1024*1024*1024*1024
+        local gb=$(echo "scale=2; $bytes / 1073741824" | bc)
+        echo "${gb} GB"
+    else
+        local tb=$(echo "scale=2; $bytes / 1099511627776" | bc)
+        echo "${tb} TB"
+    fi
 }
 
 # 获取网络统计信息
@@ -221,24 +234,67 @@ check_interface() {
 
 # 主监控函数
 monitor_traffic() {
-    log "INFO" "开始监控网口 $INTERFACE 的流量"
-    log "INFO" "每日限制: ${DAILY_LIMIT_GB}GB"
+    log "INFO" "=========================================="
+    log "INFO" "流量监控启动"
+    log "INFO" "=========================================="
+    log "INFO" "监控网口: $INTERFACE"
+    log "INFO" "每日限制: ${DAILY_LIMIT_GB}GB ($(format_bytes $DAILY_LIMIT_BYTES))"
     log "INFO" "限速阈值: ${SPEED_LIMIT_MBPS}Mbps"
     log "INFO" "检查间隔: ${CHECK_INTERVAL}秒"
+    log "INFO" "当前日期: $(date '+%Y-%m-%d %H:%M:%S')"
     
     # 获取初始统计
     local stats=$(get_network_stats)
     local last_rx=$(echo $stats | awk '{print $1}')
     local last_tx=$(echo $stats | awk '{print $2}')
+    log "INFO" "初始网口统计 - RX: $(format_bytes $last_rx), TX: $(format_bytes $last_tx)"
     
     # 加载每日数据
     local daily_data=$(load_daily_data)
     local daily_rx=$(echo $daily_data | awk '{print $1}')
     local daily_tx=$(echo $daily_data | awk '{print $2}')
+    local total_loaded=$((daily_rx + daily_tx))
+    
+    if [ $total_loaded -gt 0 ]; then
+        log "INFO" "今日已用流量 - 总计: $(format_bytes $total_loaded) (RX: $(format_bytes $daily_rx), TX: $(format_bytes $daily_tx))"
+    else
+        log "INFO" "今日流量统计从0开始"
+    fi
+    
+    log "INFO" "=========================================="
     
     local start_time=$(date +%s)
     
+    # 保存当前日期用于检测日期变化
+    local current_date=$(date '+%Y-%m-%d')
+    
     while [ "$RUNNING" = true ]; do
+        # 检查是否到了新的一天
+        local new_date=$(date '+%Y-%m-%d')
+        if [ "$new_date" != "$current_date" ]; then
+            log "INFO" "=========================================="
+            log "INFO" "检测到日期变化: $current_date -> $new_date"
+            log "INFO" "重置流量统计，开始新的一天"
+            log "INFO" "=========================================="
+            current_date="$new_date"
+            # 记录昨天的总流量
+            local yesterday_total=$((daily_rx + daily_tx))
+            log "INFO" "昨日总流量: $(format_bytes $yesterday_total) (RX: $(format_bytes $daily_rx), TX: $(format_bytes $daily_tx))"
+            # 重置计数器
+            daily_rx=0
+            daily_tx=0
+            # 如果有限速，解除限速
+            if [ "$IS_LIMITED" = true ]; then
+                log "INFO" "新的一天开始，解除速度限制"
+                remove_speed_limit
+            fi
+            # 重新获取基准值
+            local stats=$(get_network_stats)
+            last_rx=$(echo $stats | awk '{print $1}')
+            last_tx=$(echo $stats | awk '{print $2}')
+            log "INFO" "今日流量统计已重置为0，每日限制: ${DAILY_LIMIT_GB}GB"
+        fi
+        
         # 获取当前统计
         local current_stats=$(get_network_stats)
         local current_rx=$(echo $current_stats | awk '{print $1}')
